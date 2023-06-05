@@ -277,7 +277,7 @@ def render_array(sys: brax.System,
   return arr
 
 
-def render(sys: brax.System,
+def render_base(sys: brax.System,
            states: List[brax.State],
            width: int,
            height: int,
@@ -302,7 +302,6 @@ def render(sys: brax.System,
   for state, camera in zip(states, cameras):
     x = state.x.concatenate(base.Transform.zero((1,)))
     instances = _with_state(objs, x)
-    target = state.x.pos[0, :]
     img = _render(
       instances=instances,
       width=width * ssaa,
@@ -319,6 +318,65 @@ def render(sys: brax.System,
       frame = frame.resize((width, height))
 
     frames.append(frame)
+
+  f = io.BytesIO()
+  if len(frames) == 1:
+    frames[0].save(f, format=fmt)
+  else:
+    frames[0].save(
+        f,
+        format=fmt,
+        append_images=frames[1:],
+        save_all=True,
+        duration=sys.dt * 1000,
+        loop=0)
+  return f.getvalue()
+
+
+def render(sys: brax.System,
+           states: List[brax.State],
+           width: int,
+           height: int,
+           light: Optional[Light] = None,
+           cameras: Optional[List[Camera]] = None,
+           ssaa: int = 2,
+           fmt='png',
+           shadow: Optional[Shadow] = None,
+           enable_shadow: bool = True) -> bytes:
+  """Returns an image of a brax system and QP."""
+  if not states:
+    raise RuntimeError('must have at least one qp')
+  if cameras is None:
+    cameras = [get_camera(sys, state, width, height, ssaa) for state in states]
+
+  objs = _build_objects(sys)
+  _render = jax.jit(
+    render_instances,
+    static_argnames=("width", "height", "enable_shadow"),
+  )
+  images: List[jp.ndarray] = []
+  for state, camera in zip(states, cameras):
+    x = state.x.concatenate(base.Transform.zero((1,)))
+    instances = _with_state(objs, x)
+    img = _render(
+      instances=instances,
+      width=width * ssaa,
+      height=height * ssaa,
+      camera=camera,
+      light=light,
+      shadow=shadow,
+      camera_target=get_target(state),
+      enable_shadow=enable_shadow,
+    )
+    arr = transpose_for_display((img * 255).astype(jp.uint8))
+    images.append(arr)
+
+  images_in_device: List[jp.ndarray] = jax.device_get(images)
+  np_arrays: Iterable[onp.ndarray] = map(onp.asarray, images_in_device)
+  frames: List[Image.Image] = [
+    Image.fromarray(arr).resize((width, height))
+    if ssaa > 1 else Image.fromarray(arr)
+    for arr in np_arrays]
 
   f = io.BytesIO()
   if len(frames) == 1:
